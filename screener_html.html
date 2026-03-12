@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Fundamental Screener</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #020617; color: #f1f5f9; font-family: system-ui, sans-serif; }
+    input, button { outline: none; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState } = React;
+
+    const AV = "https://www.alphavantage.co/query";
+    const WEIGHTS = { profitability:0.25, growth:0.30, health:0.20, valuation:0.15, macro:0.10 };
+    const CAT_JP = { profitability:"収益性", growth:"成長性", health:"財務健全性", valuation:"バリュエーション", macro:"マクロ" };
+
+    const toN = v => { if(!v||v==="None"||v==="-"||v==="0")return null; const x=parseFloat(v); return isNaN(x)?null:x; };
+    const safeDiv = (a,b) => { const x=toN(a),y=toN(b); return(x!==null&&y!==null&&y!==0)?x/y:null; };
+    const sleep = ms => new Promise(r=>setTimeout(r,ms));
+    const fmtN = (v,d=2) => v!==null&&v!==undefined?v.toFixed(d):"—";
+    const fmtPct = (v,d=1) => v!==null&&v!==undefined?`${v.toFixed(d)}%`:"—";
+    const clamp = (v,lo=0,hi=10) => Math.min(hi,Math.max(lo,isNaN(v)?5:v));
+    const COLOR = v => v>=7.5?"#22c55e":v>=5?"#f59e0b":"#ef4444";
+    const BGCOL = v => v>=7.5?"rgba(34,197,94,0.10)":v>=5?"rgba(245,158,11,0.10)":"rgba(239,68,68,0.10)";
+
+    async function avFetch(fn, sym, key) {
+      const r = await fetch(`${AV}?function=${fn}&symbol=${sym}&apikey=${key}`);
+      const d = await r.json();
+      if (d.Note||d.Information) throw new Error("API制限: "+(d.Note||d.Information).substring(0,50));
+      return d;
+    }
+
+    function calcMetrics(ov,inc,bal,cf) {
+      const ai=inc?.annualReports||[], ab=bal?.annualReports||[], ac=cf?.annualReports||[];
+      const roe=toN(ov.ReturnOnEquityTTM)!==null?toN(ov.ReturnOnEquityTTM)*100:null;
+      const roa=toN(ov.ReturnOnAssetsTTM)!==null?toN(ov.ReturnOnAssetsTTM)*100:null;
+      const opMargin=toN(ov.OperatingMarginTTM)!==null?toN(ov.OperatingMarginTTM)*100:null;
+      const netMgn=toN(ov.ProfitMargin)!==null?toN(ov.ProfitMargin)*100:null;
+      const pe=toN(ov.PERatio), peg=toN(ov.PEGRatio), pb=toN(ov.PriceToBookRatio), evEbitda=toN(ov.EVToEBITDA);
+      const mktCap=toN(ov.MarketCapitalization);
+      let revCAGR=null;
+      if(ai.length>=3){const r0=toN(ai[0].totalRevenue),r2=toN(ai[2].totalRevenue);if(r0&&r2&&r2>0)revCAGR=((r0/r2)**0.5-1)*100;}
+      let epsGrowth=toN(ov.QuarterlyEarningsGrowthYOY)!==null?toN(ov.QuarterlyEarningsGrowthYOY)*100:null;
+      if(ai.length>=2){const n0=toN(ai[0].netIncome),n1=toN(ai[1].netIncome);if(n0!==null&&n1!==null&&n1!==0)epsGrowth=((n0-n1)/Math.abs(n1))*100;}
+      let fcfMargin=null,fcfGrowth=null;
+      if(ac.length>=1){
+        const ocf=toN(ac[0].operatingCashflow),cap=toN(ac[0].capitalExpenditures);
+        if(ocf!==null&&cap!==null){
+          const fcf0=ocf-Math.abs(cap);
+          const rev=toN(ai[0]?.totalRevenue);
+          if(rev&&rev>0)fcfMargin=(fcf0/rev)*100;
+          if(ac.length>=2){const o1=toN(ac[1].operatingCashflow),c1=toN(ac[1].capitalExpenditures);if(o1!==null&&c1!==null){const f1=o1-Math.abs(c1);if(f1!==0)fcfGrowth=((fcf0-f1)/Math.abs(f1))*100;}}
+        }
+      }
+      const currentRatio=safeDiv(ab[0]?.totalCurrentAssets,ab[0]?.totalCurrentLiabilities);
+      const equity=toN(ab[0]?.totalShareholderEquity);
+      const debt=toN(ab[0]?.shortLongTermDebtTotal)||toN(ab[0]?.longTermDebt)||0;
+      const de=(equity&&equity>0)?debt/equity:null;
+      let piotroski=0;
+      if(roa!==null&&roa>0)piotroski++;
+      if(toN(ac[0]?.operatingCashflow)>0)piotroski++;
+      const roa0y=safeDiv(ai[0]?.netIncome,ab[0]?.totalAssets),roa1y=safeDiv(ai[1]?.netIncome,ab[1]?.totalAssets);
+      if(roa0y!==null&&roa1y!==null&&roa0y>roa1y)piotroski++;
+      const cr1=safeDiv(ab[1]?.totalCurrentAssets,ab[1]?.totalCurrentLiabilities);
+      if(currentRatio!==null&&cr1!==null&&currentRatio>cr1)piotroski++;
+      const lev0=safeDiv(ab[0]?.longTermDebt,ab[0]?.totalAssets),lev1=safeDiv(ab[1]?.longTermDebt,ab[1]?.totalAssets);
+      if(lev0!==null&&lev1!==null&&lev0<lev1)piotroski++;
+      const gm0=safeDiv(ai[0]?.grossProfit,ai[0]?.totalRevenue),gm1=safeDiv(ai[1]?.grossProfit,ai[1]?.totalRevenue);
+      if(gm0!==null&&gm1!==null&&gm0>gm1)piotroski++;
+      const at0=safeDiv(ai[0]?.totalRevenue,ab[0]?.totalAssets),at1=safeDiv(ai[1]?.totalRevenue,ab[1]?.totalAssets);
+      if(at0!==null&&at1!==null&&at0>at1)piotroski++;
+      return {name:ov.Name||"-",sector:ov.Sector||"-",industry:ov.Industry||"-",exchange:ov.Exchange||"",
+        roe,roa,opMargin,netMgn,fcfMargin,mktCap,revCAGR,epsGrowth,fcfGrowth,currentRatio,de,piotroski,pe,peg,pb,evEbitda};
+    }
+
+    const scoreAsc=(v,t,s)=>{if(v===null)return 5;for(let i=0;i<t.length;i++)if(v>=t[i])return s[i];return s[t.length];};
+    const scoreDesc=(v,t,s)=>{if(v===null)return 5;for(let i=0;i<t.length;i++)if(v<=t[i])return s[i];return s[t.length];};
+    const H=[10,8.5,7,5.5,4,2];
+
+    function calcScores(m) {
+      return {
+        profitability:clamp(scoreAsc(m.roe,[25,18,12,7,3],H)*0.35+scoreAsc(m.opMargin,[25,15,8,3,0],H)*0.35+scoreAsc(m.fcfMargin,[20,12,5,0],[10,8,6,4,1])*0.30),
+        growth:clamp(scoreAsc(m.revCAGR,[25,15,8,3],[10,8,6,4,2])*0.40+scoreAsc(m.epsGrowth,[25,15,8,0],[10,8,6,4,1])*0.35+scoreAsc(m.fcfGrowth,[20,10,3,0],[10,8,6,4,1])*0.25),
+        health:clamp(scoreAsc(m.currentRatio,[2.5,2.0,1.5,1.0],[10,8,6,4,2])*0.25+scoreDesc(m.de,[0.3,0.7,1.0,1.5],[10,8,6,4,2])*0.30+(m.piotroski/7)*10*0.45),
+        valuation:clamp(scoreDesc(m.peg,[0.8,1.2,1.7,2.5],[10,8,6,4,2])*0.45+scoreDesc(m.pe,[12,18,25,35],[10,8,6,4,2])*0.35+scoreDesc(m.pb,[1.0,2.5,5.0,10],[10,8,6,4,2])*0.20),
+        macro:6.0,
+      };
+    }
+    const totalScore = s => Object.entries(WEIGHTS).reduce((sum,[k,w])=>sum+(s[k]||0)*w,0);
+
+    const MiniBar=({score})=>(
+      <div style={{background:"#1e293b",borderRadius:3,height:5,width:60,display:"inline-block",verticalAlign:"middle",marginLeft:6}}>
+        <div style={{width:`${Math.min(100,score*10)}%`,height:"100%",background:COLOR(score),borderRadius:3}}/>
+      </div>
+    );
+
+    const TABLE_ROWS = [
+      {label:"総合スコア",key:"total",fmt:v=>v.toFixed(1),highlight:true},
+      {label:"",key:"sep0",sep:true},
+      {label:"収益性スコア",key:"sc_profitability",fmt:v=>v.toFixed(1),cat:true},
+      {label:"ROE",key:"roe",fmt:fmtPct},
+      {label:"営業利益率",key:"opMargin",fmt:fmtPct},
+      {label:"FCFマージン",key:"fcfMargin",fmt:fmtPct},
+      {label:"",key:"sep1",sep:true},
+      {label:"成長性スコア",key:"sc_growth",fmt:v=>v.toFixed(1),cat:true},
+      {label:"売上CAGR(3Y)",key:"revCAGR",fmt:fmtPct},
+      {label:"純利益成長",key:"epsGrowth",fmt:fmtPct},
+      {label:"FCF成長率",key:"fcfGrowth",fmt:fmtPct},
+      {label:"",key:"sep2",sep:true},
+      {label:"財務健全性スコア",key:"sc_health",fmt:v=>v.toFixed(1),cat:true},
+      {label:"流動比率",key:"currentRatio",fmt:v=>fmtN(v,2)},
+      {label:"D/E比率",key:"de",fmt:v=>fmtN(v,2)},
+      {label:"Piotroski F",key:"piotroski",fmt:v=>`${v}/7`},
+      {label:"",key:"sep3",sep:true},
+      {label:"バリュエーションスコア",key:"sc_valuation",fmt:v=>v.toFixed(1),cat:true},
+      {label:"P/E",key:"pe",fmt:v=>fmtN(v,1)},
+      {label:"PEG",key:"peg",fmt:v=>fmtN(v,2)},
+      {label:"P/B",key:"pb",fmt:v=>fmtN(v,2)},
+      {label:"EV/EBITDA",key:"evEbitda",fmt:v=>fmtN(v,1)},
+    ];
+
+    function getBest(rows,data){
+      const best={};
+      rows.forEach(row=>{
+        if(row.sep||row.highlight||row.cat)return;
+        let bv=null,bt=null;
+        const higherBetter=!["pe","peg","pb","evEbitda","de"].includes(row.key);
+        data.forEach(d=>{const v=d.metrics[row.key]??null;if(v===null)return;if(bv===null||(higherBetter?v>bv:v<bv)){bv=v;bt=d.ticker;}});
+        if(bt)best[row.key]=bt;
+      });
+      return best;
+    }
+
+    function CompareTable({data}){
+      const best=getBest(TABLE_ROWS,data);
+      const sorted=[...data].sort((a,b)=>totalScore(b.scores)-totalScore(a.scores));
+      return (
+        <div style={{overflowX:"auto",marginBottom:24}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+            <thead>
+              <tr>
+                <th style={{textAlign:"left",padding:"8px 10px",color:"#475569",fontWeight:600,width:140,background:"#0a0f1e",position:"sticky",left:0,zIndex:2}}>指標</th>
+                {sorted.map(d=>{
+                  const tot=totalScore(d.scores);
+                  return (
+                    <th key={d.ticker} style={{textAlign:"center",padding:"8px 14px",background:"#0f172a",borderLeft:"1px solid #1e293b",minWidth:110}}>
+                      <div style={{fontSize:15,fontWeight:800,color:"#f1f5f9"}}>{d.ticker}</div>
+                      <div style={{fontSize:10,color:"#475569",marginTop:2}}>{d.metrics.sector}</div>
+                      <div style={{fontSize:18,fontWeight:800,color:COLOR(tot),marginTop:4}}>{tot.toFixed(1)}</div>
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {TABLE_ROWS.map((row,ri)=>{
+                if(row.sep)return(<tr key={ri}><td colSpan={sorted.length+1} style={{padding:0,height:1,background:"#1e293b"}}></td></tr>);
+                return (
+                  <tr key={ri} style={{background:ri%2===0?"#0a0f1e":"#080d18"}}>
+                    <td style={{padding:"6px 10px",color:row.highlight?"#f1f5f9":row.cat?"#94a3b8":"#64748b",fontWeight:row.highlight||row.cat?700:400,position:"sticky",left:0,background:ri%2===0?"#0a0f1e":"#080d18",zIndex:1,paddingLeft:row.cat||row.highlight?10:18}}>
+                      {row.label}
+                    </td>
+                    {sorted.map(d=>{
+                      let rawVal,displayVal;
+                      if(row.highlight){rawVal=totalScore(d.scores);displayVal=row.fmt(rawVal);}
+                      else if(row.cat){const k=row.key.replace("sc_","");rawVal=d.scores[k];displayVal=row.fmt(rawVal);}
+                      else{rawVal=d.metrics[row.key];displayVal=row.fmt(rawVal);}
+                      const isBest=best[row.key]===d.ticker;
+                      const scoreVal=row.cat?d.scores[row.key.replace("sc_","")]:row.highlight?rawVal:null;
+                      return (
+                        <td key={d.ticker} style={{textAlign:"center",padding:"6px 10px",borderLeft:"1px solid #1e293b",background:isBest&&!row.highlight&&!row.cat?BGCOL(8):undefined,color:row.highlight||row.cat?COLOR(rawVal):"#cbd5e1",fontWeight:row.highlight||row.cat?700:400}}>
+                          {displayVal}
+                          {(row.cat||row.highlight)&&scoreVal!==null&&<MiniBar score={scoreVal}/>}
+                          {isBest&&!row.highlight&&!row.cat&&<span style={{marginLeft:4,fontSize:9,color:"#22c55e"}}>▲</span>}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div style={{fontSize:10,color:"#334155",marginTop:4}}>▲ = その指標で最良の銘柄</div>
+        </div>
+      );
+    }
+
+    function ScoreCard({data}){
+      const [exp,setExp]=useState(false);
+      const {ticker,metrics:m,scores,summary}=data;
+      const total=totalScore(scores);
+      return (
+        <div style={{background:"#0f172a",border:"1px solid #334155",borderRadius:12,padding:20,marginBottom:14}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+            <div>
+              <div style={{fontSize:18,fontWeight:800,color:"#f1f5f9"}}>{ticker} <span style={{fontSize:11,color:"#334155"}}>{m.exchange}</span></div>
+              <div style={{fontSize:12,color:"#94a3b8",marginTop:1}}>{m.name}</div>
+              <div style={{fontSize:11,color:"#475569"}}>{m.sector}</div>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:36,fontWeight:800,color:COLOR(total),lineHeight:1}}>{total.toFixed(1)}</div>
+              <div style={{fontSize:10,color:"#475569"}}>/10</div>
+            </div>
+          </div>
+          {Object.entries(CAT_JP).map(([k,label])=>{
+            const s=scores[k];
+            return (
+              <div key={k} style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
+                <span style={{fontSize:11,color:"#64748b",width:108,flexShrink:0}}>{label} <span style={{color:"#1e3a5f",fontSize:9}}>×{(WEIGHTS[k]*100).toFixed(0)}%</span></span>
+                <div style={{flex:1,background:"#1e293b",borderRadius:3,height:6}}>
+                  <div style={{width:`${Math.min(100,s*10)}%`,height:"100%",background:COLOR(s),borderRadius:3,transition:"width 0.6s"}}/>
+                </div>
+                <span style={{fontSize:12,fontWeight:700,color:COLOR(s),width:28,textAlign:"right"}}>{s.toFixed(1)}</span>
+              </div>
+            );
+          })}
+          {summary&&<div style={{marginTop:10,padding:10,background:"#1e293b",borderRadius:8,fontSize:12,color:"#94a3b8",lineHeight:1.7,borderLeft:"3px solid #3b82f6"}}>{summary}</div>}
+          <button onClick={()=>setExp(!exp)} style={{marginTop:8,background:"none",border:"1px solid #1e293b",borderRadius:6,padding:"3px 12px",color:"#475569",fontSize:11,cursor:"pointer"}}>
+            {exp?"▲ 閉じる":"▼ 詳細指標"}
+          </button>
+          {exp&&(
+            <div style={{marginTop:10,display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"4px 14px"}}>
+              {[["ROE",fmtPct(m.roe)],["営業利益率",fmtPct(m.opMargin)],["純利益率",fmtPct(m.netMgn)],
+                ["FCFマージン",fmtPct(m.fcfMargin)],["売上CAGR",fmtPct(m.revCAGR)],["純利益成長",fmtPct(m.epsGrowth)],
+                ["FCF成長率",fmtPct(m.fcfGrowth)],["流動比率",fmtN(m.currentRatio)],["D/E",fmtN(m.de)],
+                ["Piotroski",m.piotroski+"/7"],["P/E",fmtN(m.pe,1)],["PEG",fmtN(m.peg,2)],
+                ["P/B",fmtN(m.pb,2)],["EV/EBITDA",fmtN(m.evEbitda,1)],
+              ].map(([k,v])=>(
+                <div key={k} style={{display:"flex",justifyContent:"space-between",padding:"3px 0",borderBottom:"1px solid #1e293b"}}>
+                  <span style={{fontSize:10,color:"#64748b"}}>{k}</span>
+                  <span style={{fontSize:10,color:"#cbd5e1",fontWeight:600}}>{v}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function App(){
+      const [avKey,setAvKey]=useState("");
+      const [anthropicKey,setAnthropicKey]=useState("");
+      const [input,setInput]=useState("");
+      const [results,setResults]=useState([]);
+      const [loading,setLoading]=useState(false);
+      const [status,setStatus]=useState("");
+      const [errors,setErrors]=useState([]);
+      const [view,setView]=useState("table");
+
+      const analyze=async()=>{
+        const tickers=input.toUpperCase().split(/[\s,]+/).filter(Boolean);
+        if(!tickers.length||!avKey)return;
+        setLoading(true);setResults([]);setErrors([]);
+        const errs=[];
+        for(let i=0;i<tickers.length;i++){
+          const ticker=tickers[i];
+          try{
+            setStatus(`${ticker}: OVERVIEW取得中...`);
+            const ov=await avFetch("OVERVIEW",ticker,avKey);
+            if(!ov.Symbol)throw new Error("銘柄が見つかりません");
+            await sleep(2500);setStatus(`${ticker}: 損益計算書...`);
+            const inc=await avFetch("INCOME_STATEMENT",ticker,avKey).catch(()=>null);
+            await sleep(2500);setStatus(`${ticker}: 貸借対照表...`);
+            const bal=await avFetch("BALANCE_SHEET",ticker,avKey).catch(()=>null);
+            await sleep(2500);setStatus(`${ticker}: CF計算書...`);
+            const cf=await avFetch("CASH_FLOW",ticker,avKey).catch(()=>null);
+            const metrics=calcMetrics(ov,inc,bal,cf);
+            const scores=calcScores(metrics);
+            let summary=null;
+            if(anthropicKey){
+              setStatus(`${ticker}: AI分析中...`);
+              try{
+                const prompt=`米国株${ticker}（${metrics.name}、${metrics.sector}）\nROE:${fmtPct(metrics.roe)} 営業利益率:${fmtPct(metrics.opMargin)} FCFマージン:${fmtPct(metrics.fcfMargin)} 売上CAGR:${fmtPct(metrics.revCAGR)} 純利益成長:${fmtPct(metrics.epsGrowth)} D/E:${fmtN(metrics.de)} 流動比率:${fmtN(metrics.currentRatio)} Piotroski:${metrics.piotroski}/7 P/E:${fmtN(metrics.pe,1)} PEG:${fmtN(metrics.peg,2)}\n1〜2年保有の投資論文を日本語3文（強み・懸念・結論）で。`;
+                const r=await fetch("https://api.anthropic.com/v1/messages",{
+                  method:"POST",
+                  headers:{"Content-Type":"application/json","x-api-key":anthropicKey,"anthropic-version":"2023-06-01","anthropic-beta":"interstitial-1"},
+                  body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:300,messages:[{role:"user",content:prompt}]})
+                });
+                const d=await r.json();summary=d.content?.[0]?.text||null;
+              }catch{}
+            }
+            setResults(prev=>[...prev,{ticker,metrics,scores,summary}]);
+          }catch(e){errs.push(`${ticker}: ${e.message}`);}
+          if(i<tickers.length-1){for(let s=15;s>0;s--){setStatus(`レート制限対応: ${s}秒待機...`);await sleep(1000);}}
+        }
+        setErrors(errs);setStatus("");setLoading(false);
+      };
+
+      const sorted=[...results].sort((a,b)=>totalScore(b.scores)-totalScore(a.scores));
+
+      return (
+        <div style={{minHeight:"100vh",background:"#020617",color:"#f1f5f9",fontFamily:"system-ui,sans-serif",padding:24}}>
+          <div style={{maxWidth:900,margin:"0 auto"}}>
+            <h1 style={{fontSize:19,fontWeight:800,margin:"0 0 3px"}}>📊 ファンダメンタル・スクリーナー</h1>
+            <p style={{fontSize:11,color:"#475569",margin:"0 0 18px"}}>Alpha Vantage実データ → 5カテゴリスコアリング → 比較テーブル</p>
+            <div style={{background:"#0f172a",border:"1px solid #334155",borderRadius:12,padding:18,marginBottom:18}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+                <div>
+                  <label style={{fontSize:10,color:"#64748b",display:"block",marginBottom:3}}>Alpha Vantage APIキー <a href="https://www.alphavantage.co/support/#api-key" target="_blank" rel="noreferrer" style={{color:"#3b82f6",fontSize:9}}>無料取得 →</a></label>
+                  <input type="password" value={avKey} onChange={e=>setAvKey(e.target.value)} placeholder="YOUR_KEY" style={{width:"100%",background:"#1e293b",border:"1px solid #334155",borderRadius:8,padding:"7px 10px",color:"#f1f5f9",fontSize:12,boxSizing:"border-box"}}/>
+                </div>
+                <div>
+                  <label style={{fontSize:10,color:"#64748b",display:"block",marginBottom:3}}>Anthropic APIキー（AI論文・任意）</label>
+                  <input type="password" value={anthropicKey} onChange={e=>setAnthropicKey(e.target.value)} placeholder="sk-ant-..." style={{width:"100%",background:"#1e293b",border:"1px solid #334155",borderRadius:8,padding:"7px 10px",color:"#f1f5f9",fontSize:12,boxSizing:"border-box"}}/>
+                </div>
+              </div>
+              <div style={{marginBottom:10}}>
+                <label style={{fontSize:10,color:"#64748b",display:"block",marginBottom:3}}>ティッカー（スペース区切り）<span style={{color:"#334155",fontSize:9}}>　無料枠: 25req/日、1銘柄4req消費</span></label>
+                <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&!loading&&analyze()} placeholder="例: AAPL MSFT NVDA GOOG AMZN" style={{width:"100%",background:"#1e293b",border:"1px solid #334155",borderRadius:8,padding:"8px 12px",color:"#f1f5f9",fontSize:13,boxSizing:"border-box"}}/>
+              </div>
+              <button onClick={analyze} disabled={loading||!avKey} style={{width:"100%",background:loading?"#1e293b":"#3b82f6",border:loading?"1px solid #334155":"none",borderRadius:8,padding:"10px 0",color:loading?"#64748b":"#fff",fontSize:13,fontWeight:600,cursor:loading?"not-allowed":"pointer"}}>
+                {loading?`⏳ ${status}`:"🚀 分析開始"}
+              </button>
+              {errors.map((e,i)=><div key={i} style={{marginTop:5,color:"#ef4444",fontSize:11}}>⚠ {e}</div>)}
+            </div>
+            {sorted.length>0&&(
+              <>
+                <div style={{display:"flex",gap:8,marginBottom:14,alignItems:"center"}}>
+                  <span style={{fontSize:11,color:"#475569"}}>{sorted.length}銘柄</span>
+                  <div style={{marginLeft:"auto",display:"flex",gap:4}}>
+                    {[["table","📋 比較テーブル"],["card","🃏 カードビュー"]].map(([v,l])=>(
+                      <button key={v} onClick={()=>setView(v)} style={{padding:"5px 14px",borderRadius:6,border:"none",fontSize:11,cursor:"pointer",fontWeight:view===v?700:400,background:view===v?"#3b82f6":"#1e293b",color:view===v?"#fff":"#64748b"}}>{l}</button>
+                    ))}
+                  </div>
+                </div>
+                {view==="table"?<CompareTable data={sorted}/>:sorted.map((r,i)=><ScoreCard key={i} data={r}/>)}
+              </>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+</body>
+</html>
